@@ -28,6 +28,7 @@
   import { TouchZoom, INITIAL_ZOOM } from "./action/touchZoom";
   import { arrangeNewTerminal } from "./arrange";
   import { settings } from "./settings";
+  import { EyeIcon } from "svelte-feather-icons";
 
   export let id: string;
 
@@ -109,6 +110,9 @@
   let shells: [number, WsWinsize][] = [];
   let subscriptions = new Set<number>();
 
+  // May be undefined before `users` is first populated.
+  $: hasWriteAccess = users.find(([uid]) => uid === userId)?.[1]?.canWrite;
+
   let moving = -1; // Terminal ID that is being dragged.
   let movingOrigin = [0, 0]; // Coordinates of mouse at origin when drag started.
   let movingSize: WsWinsize; // New [x, y] position of the dragged terminal.
@@ -127,9 +131,15 @@
 
   onMount(async () => {
     // The page hash sets the end-to-end encryption key.
-    const key = window.location.hash?.slice(1) ?? "";
+    const key = window.location.hash?.slice(1).split(",")[0] ?? "";
+    const writePassword = window.location.hash?.slice(1).split(",")[1] ?? null;
+
     encrypt = await Encrypt.new(key);
     const encryptedZeros = await encrypt.zeros();
+
+    const writeEncryptedZeros = writePassword
+      ? await (await Encrypt.new(writePassword)).zeros()
+      : null;
 
     srocket = new Srocket<WsServer, WsClient>(`/api/s/${id}`, {
       onMessage(message) {
@@ -198,7 +208,7 @@
       },
 
       onConnect() {
-        srocket?.send({ authenticate: encryptedZeros });
+        srocket?.send({ authenticate: [encryptedZeros, writeEncryptedZeros] });
         if ($settings.name) {
           srocket?.send({ setName: $settings.name });
         }
@@ -253,6 +263,13 @@
   let counter = 0n;
 
   async function handleCreate() {
+    if (hasWriteAccess === false) {
+      makeToast({
+        kind: "info",
+        message: "You are in read-only mode and cannot create new terminals.",
+      });
+      return;
+    }
     if (shells.length >= 14) {
       makeToast({
         kind: "error",
@@ -385,6 +402,7 @@
     <Toolbar
       {connected}
       {newMessages}
+      {hasWriteAccess}
       on:create={handleCreate}
       on:chat={() => {
         showChat = !showChat;
@@ -445,7 +463,17 @@
     {#if exitReason !== null}
       <div class="text-red-400">{exitReason}</div>
     {:else if connected}
-      <div class="text-green-400">You are connected!</div>
+      <div class="flex items-center">
+        <div class="text-green-400">You are connected!</div>
+        {#if userId && hasWriteAccess === false}
+          <div
+            class="bg-yellow-900 text-yellow-200 px-1 py-0.5 rounded ml-3 inline-flex items-center gap-1"
+          >
+            <EyeIcon size="14" />
+            <span class="text-xs">Read-only</span>
+          </div>
+        {/if}
+      </div>
     {:else}
       <div class="text-yellow-400">Connecting…</div>
     {/if}
@@ -472,9 +500,11 @@
           cols={ws.cols}
           bind:write={writers[id]}
           bind:termEl={termElements[id]}
-          on:data={({ detail: data }) => handleInput(id, data)}
+          on:data={({ detail: data }) =>
+            hasWriteAccess && handleInput(id, data)}
           on:close={() => srocket?.send({ close: id })}
           on:shrink={() => {
+            if (!hasWriteAccess) return;
             const rows = Math.max(ws.rows - 4, TERM_MIN_ROWS);
             const cols = Math.max(ws.cols - 10, TERM_MIN_COLS);
             if (rows !== ws.rows || cols !== ws.cols) {
@@ -482,15 +512,18 @@
             }
           }}
           on:expand={() => {
+            if (!hasWriteAccess) return;
             const rows = ws.rows + 4;
             const cols = ws.cols + 10;
             srocket?.send({ move: [id, { ...ws, rows, cols }] });
           }}
           on:bringToFront={() => {
+            if (!hasWriteAccess) return;
             showNetworkInfo = false;
             srocket?.send({ move: [id, null] });
           }}
           on:startMove={({ detail: event }) => {
+            if (!hasWriteAccess) return;
             const [x, y] = normalizePosition(event);
             moving = id;
             movingOrigin = [x - ws.x, y - ws.y];
@@ -498,6 +531,7 @@
             movingIsDone = false;
           }}
           on:focus={() => {
+            if (!hasWriteAccess) return;
             focused = [...focused, id];
           }}
           on:blur={() => {
